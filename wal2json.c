@@ -24,6 +24,7 @@
 #include "utils/pg_lsn.h"
 #include "utils/rel.h"
 #include "utils/syscache.h"
+#include <time.h>
 
 #define	WAL2JSON_FORMAT_VERSION			1
 #define	WAL2JSON_FORMAT_MIN_VERSION		1
@@ -114,6 +115,14 @@ _PG_output_plugin_init(OutputPluginCallbacks *cb)
 #if	PG_VERSION_NUM >= 90600
 	cb->message_cb = pg_decode_message;
 #endif
+}
+
+/* Get current time */
+static long long get_current_time(void) {
+    struct timeval tv;
+
+    gettimeofday(&tv,NULL);
+    return (((long long)tv.tv_sec)*1000)+(tv.tv_usec/1000);
 }
 
 /* Initialize this plugin */
@@ -341,6 +350,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is
 		}
 		else if (strcmp(elem->defname, "add-tables") == 0)
 		{
+			elog(DEBUG2, "add-table configuration during pg_decode_startup");
 			char	*rawstr;
 
 			/*
@@ -358,6 +368,7 @@ pg_decode_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt, bool is
 			else
 			{
 				rawstr = pstrdup(strVal(elem->arg));
+				elog(DEBUG2, "add-tables configuration - raw string %s", rawstr);
 				if (!string_to_SelectTable(rawstr, ',', &data->add_tables))
 				{
 					pfree(rawstr);
@@ -445,6 +456,11 @@ pg_decode_begin_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
 	if (data->include_timestamp)
 		appendStringInfo(ctx->out, "%s\"timestamp\":%s\"%s\",%s", data->ht, data->sp, timestamptz_to_str(txn->commit_time), data->nl);
 
+	if (!data->write_in_chunks) {
+		elog(DEBUG2, "**** Begin Txn Callback Start Recorded: %lld", get_current_time());
+		appendStringInfo(ctx->out, "%s\"decode_start\":%s%lld,%s", data->ht, data->sp, get_current_time(), data->nl);
+	}
+
 	appendStringInfo(ctx->out, "%s\"change\":%s[", data->ht, data->sp);
 
 	if (data->write_in_chunks)
@@ -470,14 +486,14 @@ pg_decode_commit_txn(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 		OutputPluginPrepareWrite(ctx, true);
 
 	/* if we don't write in chunks, we need a newline here */
-	if (!data->write_in_chunks)
+	if (!data->write_in_chunks) {
 		appendStringInfo(ctx->out, "%s", data->nl);
-
-	appendStringInfo(ctx->out, "%s]%s}", data->ht, data->nl);
+		elog(DEBUG2, "**** Commit Txn Callback End Recorded: %lld", get_current_time());
+		appendStringInfo(ctx->out, "%s]%s,%s\"decode_end\":%s%lld%s}", data->ht, data->nl, data->ht, data->sp, get_current_time(), data->nl);
+	}
 
 	OutputPluginWrite(ctx, true);
 }
-
 
 /*
  * Accumulate tuple information and stores it at the end
@@ -836,6 +852,7 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	/* Add tables */
 	if (list_length(data->add_tables) > 0)
 	{
+		elog(DEBUG2, "add-tables visited during decode change");
 		ListCell	*lc;
 		bool		skip = true;
 
@@ -859,6 +876,8 @@ pg_decode_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 		/* table was not found */
 		if (skip)
 			return;
+	} else {
+		elog(DEBUG2, "add-tables not visited during decode change");
 	}
 
 	/* Sanity checks */
